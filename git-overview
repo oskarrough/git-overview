@@ -1,10 +1,14 @@
 #!/bin/sh
 
+# git overview | column -ts '|'
+
 function printstatus {
 	cd $1
-	echo $1
+	# echo $1
 	if [ -d .git ]; then
-		git status -sb
+		local status=$(git status -sb 2>&1)
+		echo "$1 | $status"
+		# git status -sb
 	else
 		echo "Not a git repository"
 	fi;
