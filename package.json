@@ -1,0 +1,23 @@
+{
+  "name": "git-overview",
+  "version": "0.0.1",
+  "description": "Gives you an overview of your git projects in a directory",
+  "bin": {
+    "git-overview": "git-overview"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/oskarrough/git-overview.git"
+  },
+  "keywords": [
+    "git",
+    "branches"
+  ],
+  "author": "Oskar Rough",
+  "license": "MIT",
+  "homepage": "https://github.com/oskarrough/git-overview#readme"
+}
+
