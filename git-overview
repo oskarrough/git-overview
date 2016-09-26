@@ -1,23 +1,29 @@
 #!/bin/sh
 
-# git overview | column -ts '|'
+# Show the (git) status of all direct child directories.
 
-function printstatus {
-	cd $1
-	# echo $1
+print_status() {
+	cd "${1}"
 	if [ -d .git ]; then
 		local status=$(git status -sb 2>&1)
-		echo "$1 | $status"
-		# git status -sb
+		echo "${1} | ${status}"
 	else
-		echo "Not a git repository"
+		echo "${1} is not a repository"
 	fi;
 	echo ""
 	cd ..
 }
 
-# Loop over all child directories
-find . -maxdepth 1 -type d \( ! -name . \) | while read dir; do
-	printstatus "$dir/"
+# Loop over all child directories variant A.
+# for dir in */; do
+# 	print_status "$dir"
+# done
+
+# Loop over all child directories variant B.
+
+find . -maxdepth 1 -mindepth 1 -type d | while read dir; do
+	print_status "$dir"
 done
+
+# git overview | column -ts '|'
 
