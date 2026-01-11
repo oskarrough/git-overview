@@ -1,19 +1,212 @@
-#!/bin/sh
+#!/bin/bash
 
-function printstatus {
-	cd $1
-	echo $1
-	if [ -d .git ]; then
-		git status -sb
-	else
-		echo "Not a git repository"
-	fi;
-	echo ""
-	cd ..
+# git-overview - Quick status of all your git repos
+
+set -o pipefail
+
+# Colors
+RED='\033[31m'
+GREEN='\033[32m'
+YELLOW='\033[33m'
+CYAN='\033[36m'
+DIM='\033[90m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+# Symbols
+SYM_DIRTY="○"
+SYM_CLEAN="◆"
+SYM_STASH="◇"
+
+# Defaults
+MAX_DEPTH=1
+NO_COLOR=false
+SHOW_CLEAN=true
+SORT_BY="name"
+
+usage() {
+    echo "Usage: $(basename "$0") [options] [directory]"
+    echo ""
+    echo "Options:"
+    echo "  -d N        Search depth (default: 1)"
+    echo "  -t          Sort by time (recent first)"
+    echo "  -a          Only show repos needing attention"
+    echo "  --no-color  Disable colors"
+    echo "  -h          Show this help"
+    exit 0
 }
 
-# Loop over all child directories
-find . -maxdepth 1 -type d \( ! -name . \) | while read dir; do
-	printstatus "$dir/"
+# Parse args
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -d) MAX_DEPTH="$2"; shift 2 ;;
+        -t) SORT_BY="time"; shift ;;
+        -a) SHOW_CLEAN=false; shift ;;
+        --no-color) NO_COLOR=true; shift ;;
+        -h|--help) usage ;;
+        -*) echo "Unknown: $1"; usage ;;
+        *) TARGET="$1"; shift ;;
+    esac
 done
 
+TARGET="${TARGET:-.}"
+
+if [[ "$NO_COLOR" == true ]]; then
+    RED="" GREEN="" YELLOW="" CYAN="" DIM="" BOLD="" RESET=""
+fi
+
+trunc() {
+    local str="$1" max="$2"
+    if [[ ${#str} -gt $max ]]; then
+        echo "${str:0:$((max-1))}…"
+    else
+        echo "$str"
+    fi
+}
+
+get_repo_info() {
+    local dir="$1"
+    local name branch porcelain status details stashes upstream time timestamp
+
+    name=$(basename "$dir")
+    cd "$dir" 2>/dev/null || return 1
+
+    branch=$(git branch --show-current 2>/dev/null)
+    [[ -z "$branch" ]] && branch=$(git rev-parse --short HEAD 2>/dev/null || echo "?")
+
+    porcelain=$(git status --porcelain 2>/dev/null)
+    status="clean"
+    details=""
+
+    if [[ -n "$porcelain" ]]; then
+        status="dirty"
+        local modified staged untracked
+        modified=$(echo "$porcelain" | grep -c "^ M\|^.M\|^M ")
+        staged=$(echo "$porcelain" | grep -c "^[MADRC]")
+        untracked=$(echo "$porcelain" | grep -c "^??")
+
+        [[ $modified -gt 0 ]] && details+="M:$modified "
+        [[ $staged -gt 0 ]] && details+="S:$staged "
+        [[ $untracked -gt 0 ]] && details+="?:$untracked "
+        details="${details% }"
+    fi
+
+    stashes=$(git stash list 2>/dev/null | wc -l | tr -d ' ')
+    if [[ $stashes -gt 0 ]]; then
+        [[ -n "$details" ]] && details+=" "
+        details+="stash:$stashes"
+        [[ "$status" == "clean" ]] && status="stash"
+    fi
+
+    upstream=$(git rev-parse --abbrev-ref @{upstream} 2>/dev/null)
+    if [[ -n "$upstream" ]]; then
+        local ahead behind
+        read -r ahead behind <<< "$(git rev-list --left-right --count HEAD...@{upstream} 2>/dev/null)"
+        if [[ $ahead -gt 0 || $behind -gt 0 ]]; then
+            [[ -n "$details" ]] && details+=" "
+            [[ $ahead -gt 0 ]] && details+="↑$ahead"
+            [[ $behind -gt 0 ]] && details+="↓$behind"
+        fi
+    fi
+
+    read -r timestamp time <<< "$(git log -1 --format="%ct %cr" 2>/dev/null | sed 's/ ago//; s/, .*//')"
+    [[ -z "$timestamp" ]] && timestamp="0" && time="–"
+
+    echo "$name|$branch|$status|$details|$time|$timestamp"
+}
+
+sort_repos() {
+    if [[ "$SORT_BY" == "time" ]]; then
+        sort -t'|' -k6 -rn
+    else
+        sort -t'|' -k1
+    fi
+}
+
+main() {
+    local target_path
+    target_path=$(cd "$TARGET" 2>/dev/null && pwd)
+    if [[ -z "$target_path" ]]; then
+        echo "Error: Cannot access $TARGET"
+        exit 1
+    fi
+
+    local dirty_repos=()
+    local clean_repos=()
+
+    while IFS= read -r -d '' git_dir; do
+        local repo_dir info status
+        repo_dir=$(dirname "$git_dir")
+        info=$(get_repo_info "$repo_dir")
+        [[ -z "$info" ]] && continue
+
+        status=$(echo "$info" | cut -d'|' -f3)
+        if [[ "$status" == "dirty" || "$status" == "stash" ]]; then
+            dirty_repos+=("$info")
+        else
+            clean_repos+=("$info")
+        fi
+    done < <(find "$target_path" -maxdepth $((MAX_DEPTH + 1)) -type d -name ".git" -print0 2>/dev/null | sort -z)
+
+    if [[ ${#dirty_repos[@]} -gt 0 ]]; then
+        local sorted=()
+        while IFS= read -r line; do
+            sorted+=("$line")
+        done < <(printf '%s\n' "${dirty_repos[@]}" | sort_repos)
+        dirty_repos=("${sorted[@]}")
+    fi
+
+    if [[ ${#clean_repos[@]} -gt 0 ]]; then
+        local sorted=()
+        while IFS= read -r line; do
+            sorted+=("$line")
+        done < <(printf '%s\n' "${clean_repos[@]}" | sort_repos)
+        clean_repos=("${sorted[@]}")
+    fi
+
+    local total=$((${#dirty_repos[@]} + ${#clean_repos[@]}))
+
+    echo -e "${BOLD}$(basename "$target_path")${RESET} ${DIM}($total repos)${RESET}"
+    echo ""
+
+    if [[ $total -eq 0 ]]; then
+        echo "No git repos found"
+        exit 0
+    fi
+
+    for info in "${dirty_repos[@]}"; do
+        IFS='|' read -r name branch status details time _ <<< "$info"
+        local sym color
+        if [[ "$status" == "stash" ]]; then
+            sym=$SYM_STASH
+            color=$YELLOW
+        else
+            sym=$SYM_DIRTY
+            color=$RED
+        fi
+
+        printf "${color}${sym}${RESET} ${BOLD}%-20s${RESET} ${CYAN}%-12s${RESET} ${RED}%-14s${RESET} ${DIM}%s${RESET}\n" \
+            "$(trunc "$name" 20)" \
+            "$(trunc "$branch" 12)" \
+            "$details" \
+            "$time"
+    done
+
+    if [[ "$SHOW_CLEAN" == true && ${#clean_repos[@]} -gt 0 ]]; then
+        [[ ${#dirty_repos[@]} -gt 0 ]] && echo ""
+
+        for info in "${clean_repos[@]}"; do
+            IFS='|' read -r name branch status details time _ <<< "$info"
+            printf "${GREEN}${SYM_CLEAN}${RESET} ${DIM}%-20s %-12s${RESET}  %-14s ${DIM}%s${RESET}\n" \
+                "$(trunc "$name" 20)" \
+                "$(trunc "$branch" 12)" \
+                "$details" \
+                "$time"
+        done
+    fi
+
+    echo ""
+    echo -e "${DIM}${SYM_DIRTY} dirty  ${SYM_STASH} stash  ${SYM_CLEAN} clean  │  M modified  S staged  ? untracked  ↑↓ ahead/behind${RESET}"
+}
+
+main
