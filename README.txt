@@ -1,15 +1,17 @@
 GIT-OVERVIEW (1)
 
-INSTALL
-       Copy the script somewhere in your PATH and make it executable. For example:
-
-       curl -o ~/.local/bin/git-overview https://raw.githubusercontent.com/oskarrough/git-overview/main/git-overview && chmod +x ~/.local/bin/git-overview
+       Scan subdirectories for git repos and print their status.
 
 USAGE
        git-overview [OPTIONS] [FOLDER]
 
 DESCRIPTION
-       git-overview runs `git status` in every folder inside a directory and prints a formatted list view of the results. 
+       git-overview runs `git status` in every folder inside a directory and prints a formatted list view of the results.
+
+INSTALL
+       Copy the script somewhere in your PATH and make it executable. For example:
+
+       curl -o ~/.local/bin/git-overview https://raw.githubusercontent.com/oskarrough/git-overview/main/git-overview && chmod +x ~/.local/bin/git-overview 
 
 OPTIONS
        -d N
