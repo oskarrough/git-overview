@@ -1,15 +1,32 @@
-# Git overview
+GIT-OVERVIEW (1)
 
-A small program that runs `git status` for all child directories,
-and outputs in a dense overview.
+INSTALL
+       Copy the script somewhere in your PATH and make it executable. For example:
 
-For now, it's not worth publishing anywhere. 
+       curl -o ~/.local/bin/git-overview https://raw.githubusercontent.com/oskarrough/git-overview/main/git-overview && chmod +x ~/.local/bin/git-overview
 
-Git clone this repository  
-cd into it  
-chmod +x git-overview
+USAGE
+       git-overview [OPTIONS] [FOLDER]
 
-Now, try to run `git-overview` in a folder with multiple folders backed by git.
+DESCRIPTION
+       git-overview runs `git status` in every folder inside a directory and prints a formatted list view of the results. 
+
+OPTIONS
+       -d N
+              Search depth for finding git repositories (default: 1).
+
+       -t
+              Sort repositories by time (most recent first) instead of by name.
+
+       -a
+              Only show repos needing attention (dirty or with stashes). Hides clean repos.
+
+       --no-color
+              Disable colored output.
+
+       -h, --help
+              Show help message and exit.
+
 
 Example output:
 
