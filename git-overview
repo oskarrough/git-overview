@@ -66,9 +66,10 @@ trunc() {
 
 get_repo_info() {
     local dir="$1"
+    local base="$2"
     local name branch porcelain status details stashes upstream time timestamp
 
-    name=$(basename "$dir")
+    name=$(realpath --relative-to="$base" "$dir")
     cd "$dir" 2>/dev/null || return 1
 
     branch=$(git branch --show-current 2>/dev/null)
@@ -137,7 +138,7 @@ main() {
     while IFS= read -r -d '' git_dir; do
         local repo_dir info status
         repo_dir=$(dirname "$git_dir")
-        info=$(get_repo_info "$repo_dir")
+        info=$(get_repo_info "$repo_dir" "$target_path")
         [[ -z "$info" ]] && continue
 
         status=$(echo "$info" | cut -d'|' -f3)
