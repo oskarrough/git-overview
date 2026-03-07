@@ -9,9 +9,18 @@ DESCRIPTION
        git-overview runs `git status` in every folder inside a directory and prints a formatted list view of the results.
 
 INSTALL
-       Copy the script somewhere in your PATH and make it executable. For example:
+       curl (no git required):
 
-       curl -o ~/.local/bin/git-overview https://raw.githubusercontent.com/oskarrough/git-overview/main/git-overview && chmod +x ~/.local/bin/git-overview 
+       curl -o ~/.local/bin/git-overview https://raw.githubusercontent.com/oskarrough/git-overview/main/git-overview && chmod +x ~/.local/bin/git-overview
+
+       clone (stay on latest):
+
+       git clone https://github.com/oskarrough/git-overview.git ~/.local/share/git-overview
+       ln -s ~/.local/share/git-overview/git-overview ~/.local/bin/git-overview
+
+       Make sure ~/.local/bin is in your PATH. Add to ~/.bashrc or ~/.zshrc if not:
+
+       export PATH="$HOME/.local/bin:$PATH"
 
 OPTIONS
        -d N
