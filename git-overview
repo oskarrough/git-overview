@@ -21,8 +21,11 @@ NO_COLOR=false
 SHOW_CLEAN=true
 SORT_BY="name"
 
+UPGRADE_URL="https://raw.githubusercontent.com/oskarrough/git-overview/main/git-overview"
+
 usage() {
     echo "Usage: $(basename "$0") [options] [directory]"
+    echo "       $(basename "$0") upgrade"
     echo ""
     echo "Options:"
     echo "  -d N        Search depth (default: 1)"
@@ -30,11 +33,28 @@ usage() {
     echo "  -a          Only show repos needing attention"
     echo "  --no-color  Disable colors"
     echo "  -h          Show this help"
+    echo ""
+    echo "Commands:"
+    echo "  upgrade     Download latest version from GitHub"
     exit 0
+}
+
+upgrade() {
+    local path tmp
+    path=$(realpath "$0")
+    [[ -d $(dirname "$path")/.git ]] && { echo "Git checkout — run 'git pull' in $(dirname "$path")"; exit 1; }
+
+    tmp=$(mktemp) && trap 'rm -f "$tmp"' EXIT
+    curl -fsSL "$UPGRADE_URL" -o "$tmp" || { echo "Download failed"; exit 1; }
+    head -1 "$tmp" | grep -q '^#!' || { echo "Bad payload"; exit 1; }
+    cmp -s "$tmp" "$path" && { echo "Already latest."; exit 0; }
+
+    chmod +x "$tmp" && mv "$tmp" "$path" && echo "Upgraded $path"
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        upgrade) upgrade; exit ;;
         -d) MAX_DEPTH="$2"; shift 2 ;;
         -t) SORT_BY="time"; shift ;;
         -a) SHOW_CLEAN=false; shift ;;
