@@ -100,16 +100,15 @@ get_repo_info_jj() {
         status="dirty"
     fi
 
-    local ahead
-    ahead=$(jj log -r 'trunk()..@ ~ empty()' --no-graph --template 'change_id ++ "\n"' 2>/dev/null | grep -c .)
-    if [[ $ahead -gt 0 ]]; then
-        append details "↑$ahead"
-        status="dirty"
+    local has_remote
+    has_remote=$(jj log -r 'remote_bookmarks(glob:"main") | remote_bookmarks(glob:"master")' --no-graph --template 'commit_id ++ "\n"' 2>/dev/null | grep -c .)
+    if [[ $has_remote -gt 0 ]]; then
+        local ahead behind
+        ahead=$(jj log -r 'trunk()..@ ~ empty()' --no-graph --template 'change_id ++ "\n"' 2>/dev/null | grep -c .)
+        behind=$(jj log -r '@..trunk()' --no-graph --template 'change_id ++ "\n"' 2>/dev/null | grep -c .)
+        [[ $ahead -gt 0 ]] && append details "↑$ahead" && status="dirty"
+        [[ $behind -gt 0 ]] && append details "↓$behind" && status="dirty"
     fi
-
-    local behind
-    behind=$(jj log -r 'trunk()..remote_bookmarks(glob:"main") | trunk()..remote_bookmarks(glob:"master")' --no-graph --template 'change_id ++ "\n"' 2>/dev/null | grep -c .)
-    [[ $behind -gt 0 ]] && append details "↓$behind" && status="dirty"
 
     local timestamp time
     read -r timestamp time <<< "$(jj log -r '@' --no-graph --template 'committer.timestamp().utc().format("%s") ++ " " ++ committer.timestamp().ago()' 2>/dev/null | sed 's/ ago//; s/, .*//')"
