@@ -20,6 +20,9 @@ MAX_DEPTH=1
 NO_COLOR=false
 SHOW_CLEAN=true
 SORT_BY="name"
+FETCH=false
+FETCH_JOBS=8
+FETCH_TIMEOUT=10
 
 UPGRADE_URL="https://raw.githubusercontent.com/oskarrough/git-overview/main/git-overview"
 
@@ -31,6 +34,7 @@ usage() {
     echo "  -d N        Search depth (default: 1)"
     echo "  -t          Sort by time (recent first)"
     echo "  -a          Only show repos needing attention"
+    echo "  -f          Fetch from remotes before scanning (parallel)"
     echo "  --no-color  Disable colors"
     echo "  -h          Show this help"
     echo ""
@@ -58,6 +62,7 @@ while [[ $# -gt 0 ]]; do
         -d) MAX_DEPTH="$2"; shift 2 ;;
         -t) SORT_BY="time"; shift ;;
         -a) SHOW_CLEAN=false; shift ;;
+        -f|--fetch) FETCH=true; shift ;;
         --no-color) NO_COLOR=true; shift ;;
         -h|--help) usage ;;
         -*) echo "Unknown: $1"; usage ;;
@@ -172,6 +177,30 @@ get_repo_info() {
     fi
 }
 
+fetch_repo() {
+    local dir="$1"
+    if [[ -d "$dir/.jj" ]]; then
+        (cd "$dir" && GIT_TERMINAL_PROMPT=0 timeout "${FETCH_TIMEOUT}s" jj git fetch --quiet >/dev/null 2>&1)
+    else
+        (cd "$dir" && GIT_TERMINAL_PROMPT=0 timeout "${FETCH_TIMEOUT}s" git fetch --quiet --no-tags >/dev/null 2>&1)
+    fi
+}
+
+fetch_all() {
+    local -n _repos=$1
+    local count=${#_repos[@]}
+    [[ $count -eq 0 ]] && return
+    echo -e "${DIM}Fetching $count repos (max ${FETCH_JOBS} parallel, ${FETCH_TIMEOUT}s timeout)…${RESET}" >&2
+    local repo
+    for repo in "${_repos[@]}"; do
+        fetch_repo "$repo" &
+        while (( $(jobs -rp | wc -l) >= FETCH_JOBS )); do
+            wait -n 2>/dev/null || break
+        done
+    done
+    wait
+}
+
 sort_repos() {
     if [[ "$SORT_BY" == "time" ]]; then
         sort -t'|' -k6 -rn
@@ -194,11 +223,21 @@ main() {
     local target_path
     target_path=$(cd "$TARGET" 2>/dev/null && pwd) || { echo "Error: Cannot access $TARGET"; exit 1; }
 
-    local dirty_repos=() clean_repos=()
+    local dirty_repos=() clean_repos=() repo_dirs=()
 
+    local seen_dir
+    declare -A seen=()
     while IFS= read -r -d '' git_dir; do
-        local repo_dir info row_status
-        repo_dir=$(dirname "$git_dir")
+        seen_dir=$(dirname "$git_dir")
+        [[ -n "${seen[$seen_dir]:-}" ]] && continue
+        seen[$seen_dir]=1
+        repo_dirs+=("$seen_dir")
+    done < <(find "$target_path" -maxdepth $((MAX_DEPTH + 1)) -type d \( -name ".jj" -o -name ".git" \) -print0 2>/dev/null | sort -z)
+
+    [[ "$FETCH" == true ]] && fetch_all repo_dirs
+
+    local repo_dir info row_status
+    for repo_dir in "${repo_dirs[@]}"; do
         info=$(get_repo_info "$repo_dir" "$target_path")
         [[ -z "$info" ]] && continue
         row_status=$(echo "$info" | cut -d'|' -f3)
@@ -207,7 +246,7 @@ main() {
         else
             clean_repos+=("$info")
         fi
-    done < <(find "$target_path" -maxdepth $((MAX_DEPTH + 1)) -type d -name ".git" -print0 2>/dev/null | sort -z)
+    done
 
     sorted_list dirty_repos
     sorted_list clean_repos
