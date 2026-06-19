@@ -9,6 +9,10 @@ DESCRIPTION
        git-overview runs `git status` in every folder inside a directory and prints a formatted list view of the results.
 
 INSTALL
+       Requires bash 4+. macOS ships bash 3.2, so install a newer one first:
+
+       brew install bash
+
        curl (no git required):
 
        curl -o ~/.local/bin/git-overview https://raw.githubusercontent.com/oskarrough/git-overview/main/git-overview && chmod +x ~/.local/bin/git-overview

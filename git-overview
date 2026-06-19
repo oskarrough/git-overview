@@ -1,8 +1,12 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # git-overview - Quick status of all your git and jj repos
 
 set -o pipefail
+
+# Requires bash 4+ (namerefs, associative arrays, `wait -n`).
+# macOS ships bash 3.2 — install a newer one with `brew install bash`.
+# TODO(human): version guard goes here
 
 RED='\033[31m'
 GREEN='\033[32m'
@@ -101,11 +105,18 @@ append() {
     _ref+="$2"
 }
 
+relpath() {
+    # path of $1 relative to ancestor $2 (portable; BSD realpath lacks --relative-to)
+    local dir="$1" base="$2" rel="${1#"$2"/}"
+    [[ "$rel" == "$dir" ]] && rel=$(basename "$dir")
+    echo "$rel"
+}
+
 get_repo_info_jj() {
     local dir="$1" base="$2"
     local name branch status="clean" details=""
 
-    name=$(realpath --relative-to="$base" "$dir")
+    name=$(relpath "$dir" "$base")
     cd "$dir" 2>/dev/null || return 1
 
     branch=$(jj log -r '@' --no-graph --template 'bookmarks' 2>/dev/null)
@@ -143,7 +154,7 @@ get_repo_info_git() {
     local dir="$1" base="$2"
     local name branch status="clean" details=""
 
-    name=$(realpath --relative-to="$base" "$dir")
+    name=$(relpath "$dir" "$base")
     cd "$dir" 2>/dev/null || return 1
 
     branch=$(git branch --show-current 2>/dev/null)
