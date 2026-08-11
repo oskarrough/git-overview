@@ -96,9 +96,11 @@ get_repo_info_jj() {
     branch=$(jj log -r '@' --no-graph --template 'bookmarks' 2>/dev/null)
     [[ -z "$branch" ]] && branch=$(jj log -r '@' --no-graph --template 'commit_id.short(8)' 2>/dev/null || echo "?")
 
-    local wc_empty
-    wc_empty=$(jj log -r '@' --no-graph --template 'if(empty, "1", "0")' 2>/dev/null)
-    if [[ "$wc_empty" == "0" ]]; then
+    # A non-empty jj working-copy commit is not necessarily unpublished: unlike
+    # Git, jj can keep @ on a commit that is already present on a remote.
+    local wc_unpublished
+    wc_unpublished=$(jj log -r '@ ~ empty() ~ ::remote_bookmarks()' --no-graph --template '"1"' 2>/dev/null)
+    if [[ "$wc_unpublished" == "1" ]]; then
         local modified
         modified=$(jj diff --stat 2>/dev/null | tail -1 | grep -o '^[0-9]*')
         append details "M:${modified:-?}"
