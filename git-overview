@@ -65,6 +65,21 @@ while [[ $# -gt 0 ]]; do
         -f|--fetch) FETCH=true; shift ;;
         --no-color) NO_COLOR=true; shift ;;
         -h|--help) usage ;;
+        -[tafh]*)
+            short_options="${1#-}"
+            while [[ -n "$short_options" ]]; do
+                option="${short_options:0:1}"
+                short_options="${short_options:1}"
+                case "$option" in
+                    t) SORT_BY="time" ;;
+                    a) SHOW_CLEAN=false ;;
+                    f) FETCH=true ;;
+                    h) usage ;;
+                    *) echo "Unknown: -$option"; usage ;;
+                esac
+            done
+            shift
+            ;;
         -*) echo "Unknown: $1"; usage ;;
         *) TARGET="$1"; shift ;;
     esac
