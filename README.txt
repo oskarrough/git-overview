@@ -9,7 +9,7 @@ DESCRIPTION
        git-overview runs `git status` in every folder inside a directory and prints a formatted list view of the results.
 
 INSTALL
-       Requires bash 4+. macOS ships bash 3.2, so install a newer one first:
+       Requires bash 4.3+. macOS ships bash 3.2, so install a newer one first:
 
        brew install bash
 
@@ -27,8 +27,8 @@ INSTALL
        export PATH="$HOME/.local/bin:$PATH"
 
 OPTIONS
-       -d N
-              Search depth for finding git repositories (default: 1).
+       -d N, --depth N
+              Search depth for finding git and jj repositories (default: 1).
 
        -t
               Sort repositories by time (most recent first) instead of by name.
@@ -36,11 +36,18 @@ OPTIONS
        -a
               Only show repos needing attention (dirty or with stashes). Hides clean repos.
 
+       -f, --fetch
+              Fetch from every remote in parallel before scanning, so ahead/behind counts are current. Requires timeout or gtimeout.
+
        --no-color
               Disable colored output.
 
        -h, --help
               Show help message and exit.
+
+COMMANDS
+       upgrade
+              Download the latest version from GitHub and replace this script.
 
 
 Example output:

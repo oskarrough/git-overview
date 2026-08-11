@@ -4,9 +4,21 @@
 
 set -o pipefail
 
-# Requires bash 4+ (namerefs, associative arrays, `wait -n`).
+TEMP_DIRS=()
+cleanup() {
+    local dir
+    for dir in "${TEMP_DIRS[@]}"; do
+        [[ -n "$dir" ]] && rm -rf "$dir"
+    done
+}
+trap cleanup EXIT
+
+# Requires bash 4.3+ (namerefs, associative arrays, `wait -n`).
 # macOS ships bash 3.2 — install a newer one with `brew install bash`.
-# TODO(human): version guard goes here
+if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 3) )); then
+    echo "git-overview requires bash 4.3+" >&2
+    exit 1
+fi
 
 RED='\033[31m'
 GREEN='\033[32m'
@@ -27,6 +39,7 @@ SORT_BY="name"
 FETCH=false
 FETCH_JOBS=8
 FETCH_TIMEOUT=10
+SCAN_JOBS=8
 
 UPGRADE_URL="https://raw.githubusercontent.com/oskarrough/git-overview/main/git-overview"
 
@@ -35,16 +48,16 @@ usage() {
     echo "       $(basename "$0") upgrade"
     echo ""
     echo "Options:"
-    echo "  -d N        Search depth (default: 1)"
-    echo "  -t          Sort by time (recent first)"
-    echo "  -a          Only show repos needing attention"
-    echo "  -f          Fetch from remotes before scanning (parallel)"
-    echo "  --no-color  Disable colors"
-    echo "  -h          Show this help"
+    echo "  -d N, --depth N  Search depth (default: 1)"
+    echo "  -t               Sort by time (recent first)"
+    echo "  -a               Only show repos needing attention"
+    echo "  -f, --fetch      Fetch from remotes before scanning (parallel)"
+    echo "  --no-color       Disable colors"
+    echo "  -h, --help       Show this help"
     echo ""
     echo "Commands:"
-    echo "  upgrade     Download latest version from GitHub"
-    exit 0
+    echo "  upgrade          Download latest version from GitHub"
+    exit "${1:-0}"
 }
 
 upgrade() {
@@ -63,7 +76,15 @@ upgrade() {
 while [[ $# -gt 0 ]]; do
     case "$1" in
         upgrade) upgrade; exit ;;
-        -d) MAX_DEPTH="$2"; shift 2 ;;
+        -d|--depth)
+            [[ $# -ge 2 ]] || { echo "Missing depth value" >&2; exit 1; }
+            MAX_DEPTH="$2"
+            shift 2
+            ;;
+        --depth=*)
+            MAX_DEPTH="${1#*=}"
+            shift
+            ;;
         -t) SORT_BY="time"; shift ;;
         -a) SHOW_CLEAN=false; shift ;;
         -f|--fetch) FETCH=true; shift ;;
@@ -79,17 +100,20 @@ while [[ $# -gt 0 ]]; do
                     a) SHOW_CLEAN=false ;;
                     f) FETCH=true ;;
                     h) usage ;;
-                    *) echo "Unknown: -$option"; usage ;;
+                    *) echo "Unknown: -$option" >&2; usage 1 ;;
                 esac
             done
             shift
             ;;
-        -*) echo "Unknown: $1"; usage ;;
+        -*) echo "Unknown: $1" >&2; usage 1 ;;
         *) TARGET="$1"; shift ;;
     esac
 done
 
 TARGET="${TARGET:-.}"
+[[ "$MAX_DEPTH" =~ ^0*[0-9]{1,3}$ ]] || { echo "Invalid depth: $MAX_DEPTH" >&2; exit 1; }
+MAX_DEPTH=$((10#$MAX_DEPTH))
+(( MAX_DEPTH <= 100 )) || { echo "Depth is too large: $MAX_DEPTH" >&2; exit 1; }
 
 [[ "$NO_COLOR" == true ]] && RED="" GREEN="" YELLOW="" CYAN="" DIM="" BOLD="" RESET=""
 
@@ -114,37 +138,51 @@ relpath() {
 
 get_repo_info_jj() {
     local dir="$1" base="$2"
-    local name branch status="clean" details=""
+    local name branch commit status="clean" details=""
 
     name=$(relpath "$dir" "$base")
     cd "$dir" 2>/dev/null || return 1
 
-    branch=$(jj log -r '@' --no-graph --template 'bookmarks' 2>/dev/null)
-    [[ -z "$branch" ]] && branch=$(jj log -r '@' --no-graph --template 'commit_id.short(8)' 2>/dev/null || echo "?")
+    # Gather working-copy identity, changed-file count, publication state,
+    # divergence, and timestamp in one jj process.
+    local metadata kind field_branch field_commit field_modified field_conflicted field_timestamp field_time
+    local has_remote=0 modified=0 conflicted=0 ahead=0 behind=0 timestamp time
+    metadata=$(jj log -r '@ | remote_bookmarks(glob:"main") | remote_bookmarks(glob:"master") | (trunk()..@ ~ empty()) | (@..trunk())' --no-graph \
+        --template 'if(self.current_working_copy(), "W|" ++ bookmarks ++ "|" ++ commit_id.short(8) ++ "|" ++ if(!self.empty() && !self.contained_in("::remote_bookmarks()"), self.diff().files().len(), "0") ++ "|" ++ self.conflicted_files().len() ++ "|" ++ committer.timestamp().utc().format("%s") ++ "|" ++ committer.timestamp().ago() ++ "\n") ++ if(self.contained_in("remote_bookmarks(glob:\"main\") | remote_bookmarks(glob:\"master\")"), "R\n") ++ if(self.contained_in("trunk()..@ ~ empty()"), "A\n") ++ if(self.contained_in("@..trunk()"), "B\n")' \
+        2>/dev/null) || return 1
+    while IFS='|' read -r kind field_branch field_commit field_modified field_conflicted field_timestamp field_time; do
+        case "$kind" in
+            W)
+                branch=$field_branch
+                commit=$field_commit
+                modified=$field_modified
+                conflicted=$field_conflicted
+                timestamp=$field_timestamp
+                time=$field_time
+                [[ -z "$branch" ]] && branch=$commit
+                ;;
+            R) has_remote=1 ;;
+            A) ((ahead++)) ;;
+            B) ((behind++)) ;;
+        esac
+    done <<< "$metadata"
 
-    # A non-empty jj working-copy commit is not necessarily unpublished: unlike
-    # Git, jj can keep @ on a commit that is already present on a remote.
-    local wc_unpublished
-    wc_unpublished=$(jj log -r '@ ~ empty() ~ ::remote_bookmarks()' --no-graph --template '"1"' 2>/dev/null)
-    if [[ "$wc_unpublished" == "1" ]]; then
-        local modified
-        modified=$(jj diff --stat 2>/dev/null | tail -1 | grep -o '^[0-9]*')
-        append details "M:${modified:-?}"
+    if (( modified > 0 )); then
+        append details "M:$modified"
+        status="dirty"
+    fi
+    if (( conflicted > 0 )); then
+        append details "U:$conflicted"
         status="dirty"
     fi
 
-    local has_remote
-    has_remote=$(jj log -r 'remote_bookmarks(glob:"main") | remote_bookmarks(glob:"master")' --no-graph --template 'commit_id ++ "\n"' 2>/dev/null | grep -c .)
-    if [[ $has_remote -gt 0 ]]; then
-        local ahead behind
-        ahead=$(jj log -r 'trunk()..@ ~ empty()' --no-graph --template 'change_id ++ "\n"' 2>/dev/null | grep -c .)
-        behind=$(jj log -r '@..trunk()' --no-graph --template 'change_id ++ "\n"' 2>/dev/null | grep -c .)
-        [[ $ahead -gt 0 ]] && append details "↑$ahead" && status="dirty"
-        [[ $behind -gt 0 ]] && append details "↓$behind" && status="dirty"
+    if (( has_remote )); then
+        (( ahead > 0 )) && append details "↑$ahead" && status="dirty"
+        (( behind > 0 )) && append details "↓$behind" && status="dirty"
     fi
 
-    local timestamp time
-    read -r timestamp time <<< "$(jj log -r '@' --no-graph --template 'committer.timestamp().utc().format("%s") ++ " " ++ committer.timestamp().ago()' 2>/dev/null | sed 's/ ago//; s/, .*//')"
+    time=${time% ago}
+    time=${time%%, *}
     [[ -z "$timestamp" ]] && timestamp="0" && time="–"
 
     echo "$name|$branch|$status|$details|$time|$timestamp"
@@ -152,42 +190,60 @@ get_repo_info_jj() {
 
 get_repo_info_git() {
     local dir="$1" base="$2"
-    local name branch status="clean" details=""
+    local name branch oid status="clean" details=""
 
     name=$(relpath "$dir" "$base")
     cd "$dir" 2>/dev/null || return 1
 
-    branch=$(git branch --show-current 2>/dev/null)
+    # Porcelain v2 includes branch, upstream divergence, stash count, and file
+    # state, replacing five separate git invocations with one.
+    local porcelain line xy index_state worktree_state
+    local changes=0 modified=0 staged=0 untracked=0 conflicted=0 stashes=0 ahead=0 behind=0
+    porcelain=$(git status --porcelain=v2 --branch --show-stash 2>/dev/null) || return 1
+    while IFS= read -r line; do
+        case "$line" in
+            '# branch.oid '*) oid=${line#\# branch.oid } ;;
+            '# branch.head '*) branch=${line#\# branch.head } ;;
+            '# branch.ab '*)
+                read -r ahead behind <<< "${line#\# branch.ab }"
+                ahead=${ahead#+}
+                behind=${behind#-}
+                ;;
+            '# stash '*) stashes=${line#\# stash } ;;
+            '1 '*|'2 '*|'u '*)
+                ((changes++))
+                xy=${line:2:2}
+                index_state=${xy:0:1}
+                worktree_state=${xy:1:1}
+                if [[ "$line" == 'u '* ]]; then
+                    ((conflicted++))
+                else
+                    [[ "$worktree_state" == "M" || ( "$index_state" == "M" && "$worktree_state" == "." ) ]] && ((modified++))
+                    [[ "$index_state" == [MADRC] ]] && ((staged++))
+                fi
+                ;;
+            '? '*) ((changes++)); ((untracked++)) ;;
+        esac
+    done <<< "$porcelain"
+
+    [[ "$branch" == "(detached)" ]] && branch=$(git rev-parse --short "$oid" 2>/dev/null || echo "?")
     [[ -z "$branch" ]] && branch=$(git rev-parse --short HEAD 2>/dev/null || echo "?")
 
-    local porcelain
-    porcelain=$(git status --porcelain 2>/dev/null)
-    if [[ -n "$porcelain" ]]; then
-        local modified staged untracked
-        modified=$(echo "$porcelain" | grep -c "^ M\|^.M\|^M ")
-        staged=$(echo "$porcelain" | grep -c "^[MADRC]")
-        untracked=$(echo "$porcelain" | grep -c "^??")
-        [[ $modified -gt 0 ]] && append details "M:$modified"
-        [[ $staged -gt 0 ]] && append details "S:$staged"
-        [[ $untracked -gt 0 ]] && append details "?:$untracked"
+    if (( changes > 0 )); then
+        (( modified > 0 )) && append details "M:$modified"
+        (( staged > 0 )) && append details "S:$staged"
+        (( untracked > 0 )) && append details "?:$untracked"
+        (( conflicted > 0 )) && append details "U:$conflicted"
         status="dirty"
     fi
 
-    local stashes
-    stashes=$(git stash list 2>/dev/null | wc -l | tr -d ' ')
-    if [[ $stashes -gt 0 ]]; then
+    if (( stashes > 0 )); then
         append details "stash:$stashes"
         [[ "$status" == "clean" ]] && status="stash"
     fi
 
-    local upstream
-    upstream=$(git rev-parse --abbrev-ref @{upstream} 2>/dev/null)
-    if [[ -n "$upstream" ]]; then
-        local ahead behind
-        read -r ahead behind <<< "$(git rev-list --left-right --count HEAD...@{upstream} 2>/dev/null)"
-        [[ $ahead -gt 0 ]] && append details "↑$ahead"
-        [[ $behind -gt 0 ]] && append details "↓$behind"
-    fi
+    (( ahead > 0 )) && append details "↑$ahead"
+    (( behind > 0 )) && append details "↓$behind"
 
     local timestamp time
     read -r timestamp time <<< "$(git log -1 --format="%ct %cr" 2>/dev/null | sed 's/ ago//; s/, .*//')"
@@ -205,12 +261,40 @@ get_repo_info() {
     fi
 }
 
+# Run `worker <item> <extra args…>` once per element of the array named $1,
+# keeping at most $2 jobs in flight. Each job's stdout goes to
+# $RESULTS_DIR/<index>, and $RESULTS_DIR/<index>.ok exists only if it exited 0,
+# so callers can read results back in order and spot the failures. The results
+# directory is returned in the RESULTS_DIR global rather than on stdout, because
+# a command substitution would run the fan-out in a subshell and lose both the
+# jobs and the TEMP_DIRS registration.
+RESULTS_DIR=""
+parallel_map() {
+    local -n _items=$1
+    local max_jobs=$2 worker=$3
+    shift 3
+
+    RESULTS_DIR=$(mktemp -d "${TMPDIR:-/tmp}/git-overview.XXXXXX") || return 1
+    TEMP_DIRS+=("$RESULTS_DIR")
+
+    local item index=0 active=0
+    for item in "${_items[@]}"; do
+        ("$worker" "$item" "$@" > "$RESULTS_DIR/$index" && touch "$RESULTS_DIR/$index.ok") &
+        ((index++))
+        if (( ++active >= max_jobs )); then
+            wait -n 2>/dev/null || true
+            ((active--))
+        fi
+    done
+    wait 2>/dev/null || true
+}
+
 fetch_repo() {
-    local dir="$1"
+    local dir="$1" timeout_command="$2"
     if [[ -d "$dir/.jj" ]]; then
-        (cd "$dir" && GIT_TERMINAL_PROMPT=0 timeout "${FETCH_TIMEOUT}s" jj git fetch --quiet >/dev/null 2>&1)
+        (cd "$dir" && GIT_TERMINAL_PROMPT=0 "$timeout_command" "${FETCH_TIMEOUT}s" jj git fetch --quiet >/dev/null 2>&1)
     else
-        (cd "$dir" && GIT_TERMINAL_PROMPT=0 timeout "${FETCH_TIMEOUT}s" git fetch --quiet --no-tags >/dev/null 2>&1)
+        (cd "$dir" && GIT_TERMINAL_PROMPT=0 "$timeout_command" "${FETCH_TIMEOUT}s" git fetch --quiet --no-tags >/dev/null 2>&1)
     fi
 }
 
@@ -218,15 +302,21 @@ fetch_all() {
     local -n _repos=$1
     local count=${#_repos[@]}
     [[ $count -eq 0 ]] && return
+    local timeout_command
+    if command -v timeout >/dev/null 2>&1; then
+        timeout_command=timeout
+    elif command -v gtimeout >/dev/null 2>&1; then
+        timeout_command=gtimeout
+    else
+        echo "Fetch requires timeout or gtimeout (install coreutils)" >&2
+        return 1
+    fi
+
     echo -e "${DIM}Fetching $count repos (max ${FETCH_JOBS} parallel, ${FETCH_TIMEOUT}s timeout)…${RESET}" >&2
-    local repo
-    for repo in "${_repos[@]}"; do
-        fetch_repo "$repo" &
-        while (( $(jobs -rp | wc -l) >= FETCH_JOBS )); do
-            wait -n 2>/dev/null || break
-        done
-    done
-    wait
+    # A failed fetch is routine (offline, no remote), so the .ok markers are
+    # ignored here and the scan reports whatever state it finds.
+    parallel_map "$1" "$FETCH_JOBS" fetch_repo "$timeout_command" || return 1
+    rm -rf "$RESULTS_DIR"
 }
 
 sort_repos() {
@@ -247,34 +337,98 @@ sorted_list() {
     _arr=("${sorted[@]}")
 }
 
+# Emit NUL-separated repository markers (.jj directories, .git directories and
+# the .git files that mark worktrees and submodules) under $1, up to depth $2.
+find_repo_markers() {
+    find "$1" -maxdepth "$2" \( \( -name ".jj" -type d \) -o -name ".git" \) -print0 2>/dev/null
+}
+
+# Collect the deduplicated, sorted repository directories under $2 into the
+# array named $1.
+discover_repos() {
+    local -n _repo_dirs=$1
+    local target=$2
+    local markers=() top_dirs=() marker repo_dir index count
+
+    if (( MAX_DEPTH < 3 )); then
+        while IFS= read -r -d '' marker; do
+            markers+=("$marker")
+        done < <(find_repo_markers "$target" "$((MAX_DEPTH + 1))")
+    else
+        # Deep scans can enter large dependency trees before reaching max depth,
+        # so search the top-level directories concurrently. .git and .jj are
+        # skipped: their contents hold no repositories of their own, and the
+        # target's own marker is added directly below.
+        while IFS= read -r -d '' repo_dir; do
+            top_dirs+=("$repo_dir")
+        done < <(find "$target" -mindepth 1 -maxdepth 1 -type d ! -name ".git" ! -name ".jj" -print0 2>/dev/null)
+
+        [[ -d "$target/.jj" ]] && markers+=("$target/.jj")
+        [[ -e "$target/.git" ]] && markers+=("$target/.git")
+
+        parallel_map top_dirs "$SCAN_JOBS" find_repo_markers "$MAX_DEPTH" || return 1
+        count=${#top_dirs[@]}
+        for ((index = 0; index < count; index++)); do
+            if [[ ! -e "$RESULTS_DIR/$index.ok" ]]; then
+                echo "Warning: could not search ${top_dirs[index]}" >&2
+                continue
+            fi
+            while IFS= read -r -d '' marker; do
+                markers+=("$marker")
+            done < "$RESULTS_DIR/$index"
+        done
+        rm -rf "$RESULTS_DIR"
+    fi
+
+    (( ${#markers[@]} == 0 )) && return
+
+    local -A seen=()
+    while IFS= read -r -d '' marker; do
+        repo_dir=${marker%/*}
+        [[ -n "${seen[$repo_dir]:-}" ]] && continue
+        seen[$repo_dir]=1
+        _repo_dirs+=("$repo_dir")
+    done < <(printf '%s\0' "${markers[@]}" | sort -z)
+}
+
+scan_all() {
+    local -n _repos=$1 _dirty=$3 _clean=$4
+    local base=$2 count=${#_repos[@]}
+    [[ $count -eq 0 ]] && return
+
+    parallel_map "$1" "$SCAN_JOBS" get_repo_info "$base" || return 1
+
+    local info row_status index
+    for ((index = 0; index < count; index++)); do
+        if [[ ! -e "$RESULTS_DIR/$index.ok" ]]; then
+            echo "Warning: could not scan ${_repos[index]}" >&2
+            continue
+        fi
+        IFS= read -r info < "$RESULTS_DIR/$index" || true
+        [[ -z "$info" ]] && continue
+        IFS='|' read -r _ _ row_status _ <<< "$info"
+        if [[ "$row_status" == "dirty" || "$row_status" == "stash" ]]; then
+            _dirty+=("$info")
+        else
+            _clean+=("$info")
+        fi
+    done
+
+    rm -rf "$RESULTS_DIR"
+}
+
 main() {
     local target_path
     target_path=$(cd "$TARGET" 2>/dev/null && pwd) || { echo "Error: Cannot access $TARGET"; exit 1; }
 
     local dirty_repos=() clean_repos=() repo_dirs=()
+    discover_repos repo_dirs "$target_path"
 
-    local seen_dir
-    declare -A seen=()
-    while IFS= read -r -d '' git_dir; do
-        seen_dir=$(dirname "$git_dir")
-        [[ -n "${seen[$seen_dir]:-}" ]] && continue
-        seen[$seen_dir]=1
-        repo_dirs+=("$seen_dir")
-    done < <(find "$target_path" -maxdepth $((MAX_DEPTH + 1)) -type d \( -name ".jj" -o -name ".git" \) -print0 2>/dev/null | sort -z)
+    if [[ "$FETCH" == true ]]; then
+        fetch_all repo_dirs || exit 1
+    fi
 
-    [[ "$FETCH" == true ]] && fetch_all repo_dirs
-
-    local repo_dir info row_status
-    for repo_dir in "${repo_dirs[@]}"; do
-        info=$(get_repo_info "$repo_dir" "$target_path")
-        [[ -z "$info" ]] && continue
-        row_status=$(echo "$info" | cut -d'|' -f3)
-        if [[ "$row_status" == "dirty" || "$row_status" == "stash" ]]; then
-            dirty_repos+=("$info")
-        else
-            clean_repos+=("$info")
-        fi
-    done
+    scan_all repo_dirs "$target_path" dirty_repos clean_repos
 
     sorted_list dirty_repos
     sorted_list clean_repos
@@ -288,9 +442,9 @@ main() {
         exit 0
     fi
 
+    local info name branch status details time sym color
     for info in "${dirty_repos[@]}"; do
         IFS='|' read -r name branch status details time _ <<< "$info"
-        local sym color
         if [[ "$status" == "stash" ]]; then sym=$SYM_STASH; color=$YELLOW
         else sym=$SYM_DIRTY; color=$RED
         fi
@@ -308,7 +462,7 @@ main() {
     fi
 
     echo ""
-    echo -e "${DIM}${SYM_DIRTY} dirty  ${SYM_STASH} stash  ${SYM_CLEAN} clean  │  M modified  S staged  ? untracked  ↑↓ ahead/behind${RESET}"
+    echo -e "${DIM}${SYM_DIRTY} dirty  ${SYM_STASH} stash  ${SYM_CLEAN} clean  │  M modified  S staged  ? untracked  U conflicted  ↑↓ ahead/behind${RESET}"
 }
 
 main
