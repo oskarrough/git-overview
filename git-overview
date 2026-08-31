@@ -32,7 +32,7 @@ SYM_DIRTY="○"
 SYM_CLEAN="◆"
 SYM_STASH="◇"
 
-MAX_DEPTH=1
+MAX_DEPTH=2
 NO_COLOR=false
 SHOW_CLEAN=true
 SORT_BY="name"
@@ -48,7 +48,7 @@ usage() {
     echo "       $(basename "$0") upgrade"
     echo ""
     echo "Options:"
-    echo "  -d N, --depth N  Search depth (default: 1)"
+    echo "  -d N, --depth N  Search depth (default: 2)"
     echo "  -t               Sort by time (recent first)"
     echo "  -a               Only show repos needing attention"
     echo "  -f, --fetch      Fetch from remotes before scanning (parallel)"
@@ -193,7 +193,11 @@ get_repo_info_git() {
     local name branch oid status="clean" details=""
 
     name=$(relpath "$dir" "$base")
+
     cd "$dir" 2>/dev/null || return 1
+
+    # A .git directory can be a leftover empty shell; skip non-repos quietly.
+    git rev-parse --git-dir >/dev/null 2>&1 || return 0
 
     # Porcelain v2 includes branch, upstream divergence, stash count, and file
     # state, replacing five separate git invocations with one.
